@@ -1,7 +1,7 @@
 #!/bin/bash
 
 appName=${0##*/}
-scriptDate="1-Oct-2024"
+scriptDate="4-Dec-2024"
 
 red=""
 bold=""
@@ -24,7 +24,7 @@ function usage()
     echo "      setpwm <PWM> <ZONE> Set target PWM (0-255) for one zone (${zoneList[0]}/${zoneList[1]})"
     echo "      setrpm <RPM>        Override target RPM for all fans (1000-40000)"
     echo "      trace       Display swampd trace"
-    echo "      temps       Display temperature sensors (HwmonTempSensor)"
+    echo "      temps       Display temperature sensors (HwmonTempSensor, IntelCPUSensor)"
     echo ""
     echo "    options:"
     echo "      -h          This help"
@@ -141,7 +141,7 @@ function setPwmTarget()
         echo -e "${bold}Setting PWM target to $pwmTarget ($pwmPercent%) for zone $zoneTarget${normal}"
     else
         echo -e "${bold}Setting PWM target to $pwmTarget ($pwmPercent%) for all zones${normal}"
-        rm -f "${pwmOverrideFile}.*"
+        rm -f "${pwmOverrideFile}".*
     fi
     oldPoint=""
     if [ -e "$pwmOverrideFile$overrideZone" ]; then
@@ -240,7 +240,7 @@ function startSwampd()
     fi
 
     # Since swampd is being restarted, any PWM overrides will be lost (just DBUS writes)
-    rm -fv "${pwmOverrideFile}*"
+    rm -fv "${pwmOverrideFile}"*
 
     echo -e "${bold}==> Restarting swampd: swampd -t -l $fanLogDir${normal} > $overrideLog 2>&1 &"
     swampd -t -l "$fanLogDir" > "$overrideLog" 2>&1 &
@@ -264,16 +264,18 @@ function fanStatus()
         echo -e "Currently hardcoded PWM target: $currentpwm ($pwmPercent%)  (from $pwmOverrideFile)"
         (( found=1 ))
     fi
-    if [ -e "${pwmOverrideFile}.0" ]; then
-        (( currentpwm=$(cat "$pwmOverrideFile.0") ))
+    overrideFile="${pwmOverrideFile}.0"
+    if [ -e "${overrideFile}" ]; then
+        (( currentpwm=$(cat "$overrideFile") ))
         (( pwmPercent=currentpwm*100/255 ))
-        echo -e "Currently hardcoded PWM target: $currentpwm ($pwmPercent%) for ${zoneList[0]} zone (from $pwmOverrideFile.0)"
+        echo -e "Currently hardcoded PWM target: $currentpwm ($pwmPercent%) for ${zoneList[0]} zone (from $overrideFile)"
         (( found=1 ))
     fi
-    if [ -e "${pwmOverrideFile}.1" ]; then
-        (( currentpwm=$(cat "$pwmOverrideFile.1") ))
+    overrideFile="${pwmOverrideFile}.1"
+    if [ -e "${overrideFile}" ]; then
+        (( currentpwm=$(cat "$overrideFile") ))
         (( pwmPercent=currentpwm*100/255 ))
-        echo -e "Currently hardcoded PWM target: $currentpwm ($pwmPercent%) for ${zoneList[1]} zone (from $pwmOverrideFile.0)"
+        echo -e "Currently hardcoded PWM target: $currentpwm ($pwmPercent%) for ${zoneList[1]} zone (from $overrideFile)"
         (( found=1 ))
     fi
     if [ -e "$setpointFile" ]; then
@@ -450,33 +452,44 @@ function pwmStatus()
 }
 
 # Display all DBUS properties of pwm and zone objects
+function allTemps()
+{
+    tempStatus "xyz.openbmc_project.HwmonTempSensor"
+    tempStatus "xyz.openbmc_project.IntelCPUSensor"
+}
+
+# Display all DBUS properties of pwm and zone objects
 function tempStatus()
 {
-    bus="xyz.openbmc_project.HwmonTempSensor"
-    echo -e "\nDBUS Temperature Sensors: ($bus)"
-    if [ $G_verbose -gt 0 ]; then
-        echo "==> busctl tree $bus | grep '/temperature/'"
-    fi
-    sensorList=$(busctl tree "$bus" | grep '/temperature/' | awk '{print $2}')
-    for sensor in $sensorList; do
-        sensorName=${sensor##*/}
-        if [ -z "$G_service" ]; then
-            findServiceByObjPath "$sensor"
+    if [ -n "$1" ]; then
+        bus="$1"
+        echo -e "\nDBUS Temperature Sensors: ($bus)"
+        if [ $G_verbose -gt 0 ]; then
+            echo "==> busctl tree $bus | grep '/temperature/'"
         fi
-        if [ -n "$G_service" ]; then
-            interface="xyz.openbmc_project.Sensor.Value"
-            if [ $G_verbose -gt 0 ]; then
-                echo "==> busctl call $G_service $sensor org.freedesktop.DBus.Properties GetAll s $interface"
-                if [ $G_verbose -gt 1 ]; then
-                    busctl call "$G_service" "$sensor" org.freedesktop.DBus.Properties GetAll s "$interface" | sed 's/^a{sv} ./   /'
-                fi
+        sensorList=$(busctl tree "$bus" | grep '/temperature/' | awk '{print $2}')
+        for sensor in $sensorList; do
+            sensorName=${sensor##*/}
+            if [ -z "$G_service" ]; then
+                findServiceByObjPath "$sensor"
             fi
-            temp=$(busctl get-property "$G_service" "$sensor" "$interface" Value | sed 's/^d //')
-            unit=$(busctl get-property "$G_service" "$sensor" "$interface" Unit | sed 's/^s .*.Unit.//' | sed 's/"//')
-            printf "    %-20s  %-7.2f %s\n" "$sensorName" "$temp" "$unit"
-        fi
-    done
-    G_service=""
+            if [ -n "$G_service" ]; then
+                interface="xyz.openbmc_project.Sensor.Value"
+                if [ $G_verbose -gt 0 ]; then
+                    echo "==> busctl call $G_service $sensor org.freedesktop.DBus.Properties GetAll s $interface"
+                    if [ $G_verbose -gt 1 ]; then
+                        busctl call "$G_service" "$sensor" org.freedesktop.DBus.Properties GetAll s "$interface" | sed 's/^a{sv} ./   /'
+                    fi
+                fi
+                temp=$(busctl get-property "$G_service" "$sensor" "$interface" Value | sed 's/^d //')
+                unit=$(busctl get-property "$G_service" "$sensor" "$interface" Unit | sed 's/^s .*.Unit.//' | sed 's/"//')
+                printf "    %-20s  %-7.2f %s\n" "$sensorName" "$temp" "$unit"
+            fi
+        done
+        G_service=""
+    else
+        echo "ERROR: tempStatus() requires bus name"
+    fi
 }
 
 ###
@@ -543,8 +556,8 @@ case "$1" in
             rm -f "$setpointFile"
         fi
         if [ -e "$pwmOverrideFile" ] || [ -e "${pwmOverrideFile}.0" ] || [ -e "${pwmOverrideFile}.1" ]; then
-            echo "==> Removing ${pwmOverrideFile}*"
-            rm -fv "${pwmOverrideFile}*"
+            echo "==> Removing ${pwmOverrideFile}"*
+            rm -fv "${pwmOverrideFile}"*
         fi
         if [ -e "$overrideLog" ]; then
             mv -v "$overrideLog" "$overrideLog.last"
@@ -569,7 +582,7 @@ case "$1" in
         ;;
 
     "temps" )
-        tempStatus
+        allTemps
         ;;
 
     "trace" )
